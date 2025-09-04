@@ -52,8 +52,76 @@ def aggregate_event_volume(db) -> Tuple[Dict[str, Counter], Dict[str, Counter]]:
         # placeholder "All" industry for total volume by month.
         industry_counts_by_month[m]["All"] += 1
         location_counts_by_month[m][ev.get("location", "Unknown")] += 1
-
     return industry_counts_by_month, location_counts_by_month
+def map_event_to_primary_industry(db) -> Dict[str, str]:
+    # Choose a single primary industry per event based on most frequent exhibitor industry
+    exhibitors = {e["_id"]: e for e in db["ExhibitorUser"].find({})}
+    votes: Dict[str, Counter] = defaultdict(Counter)
+    for xp in db["ExhibitorProfile"].find({}):
+        ev_id = xp.get("event")
+        ex = exhibitors.get(xp.get("exhibitor"))
+        if not ev_id or not ex:
+            continue
+        ind = ex.get("industry", "Unknown")
+        votes[ev_id][ind] += 1
+    primary: Dict[str, str] = {}
+    for ev_id, ctr in votes.items():
+        if ctr:
+            primary[ev_id] = ctr.most_common(1)[0][0]
+    return primary
+
+
+def compute_historical_shares(db) -> Tuple[Dict[str, float], Dict[str, float]]:
+    # Industry shares based on unique events by primary industry; location shares based on event locations
+    primary_by_event = map_event_to_primary_industry(db)
+    events = list(db["Event"].find({}))
+    # Use recent 6 months where events exist
+    by_month_events: Dict[str, List[dict]] = defaultdict(list)
+    for ev in events:
+        dates = ev.get("dates") or {}
+        start = dates.get("start")
+        if isinstance(start, str):
+            try:
+                start = datetime.fromisoformat(start)
+            except Exception:
+                continue
+        if not start:
+            continue
+        by_month_events[month_key(start)].append(ev)
+    months_sorted = sorted(by_month_events.keys())
+    use_months = months_sorted[-6:] if len(months_sorted) > 6 else months_sorted
+
+    industry_counts: Counter = Counter()
+    location_counts: Counter = Counter()
+    total_events = 0
+    for m in use_months:
+        for ev in by_month_events[m]:
+            ev_id = ev.get("_id")
+            ind = primary_by_event.get(ev_id, "Unknown")
+            industry_counts[ind] += 1
+            location_counts[ev.get("location", "Unknown")] += 1
+            total_events += 1
+    # Avoid division by zero
+    if total_events == 0:
+        return {}, {}
+    industry_shares = {k: v / total_events for k, v in industry_counts.items()}
+    location_shares = {k: v / total_events for k, v in location_counts.items()}
+    return industry_shares, location_shares
+
+
+def allocate_by_shares(total: int, shares: Dict[str, float]) -> Dict[str, int]:
+    if total <= 0 or not shares:
+        return {k: 0 for k in shares}
+    s = sum(shares.values())
+    base = {k: (shares[k] / s) * total if s > 0 else 0 for k in shares}
+    floored = {k: int(v) for k, v in base.items()}
+    remainder = total - sum(floored.values())
+    if remainder > 0:
+        fracs = sorted(((base[k] - floored[k], k) for k in base), reverse=True)
+        for i in range(remainder):
+            _, kk = fracs[i % len(fracs)]
+            floored[kk] += 1
+    return floored
 
 
 def moving_average_forecast(history: List[int], horizon: int = 3, window: int = 3) -> List[int]:
@@ -65,36 +133,32 @@ def moving_average_forecast(history: List[int], horizon: int = 3, window: int = 
 
 
 def forecast_event_volume(db, horizon_months: int = 3):
+    # Step 1: forecast total events per month using historical totals
     industry_counts_by_month, location_counts_by_month = aggregate_event_volume(db)
-
-    # Build consistent month ordering from history
     if not industry_counts_by_month:
         return {}, {}
-
     months_sorted = sorted(industry_counts_by_month.keys())
-    # Forecast for the next months starting from today
+    hist_totals = [sum(industry_counts_by_month[m].values()) for m in months_sorted]
     future_months = next_three_months_from_today()
+    total_preds = moving_average_forecast(hist_totals, horizon=horizon_months)
+    all_forecast = {future_months[i]: total_preds[i] for i in range(horizon_months)}
 
-    # per industry
-    industry_totals: Dict[str, List[int]] = defaultdict(list)
-    for m in months_sorted:
-        for industry, cnt in industry_counts_by_month[m].items():
-            industry_totals[industry].append(cnt)
-    industry_forecast: Dict[str, Dict[str, int]] = {}
-    for industry, hist in industry_totals.items():
-        preds = moving_average_forecast(hist, horizon=horizon_months)
-        industry_forecast[industry] = {future_months[i]: preds[i] for i in range(horizon_months)}
+    # Step 2: compute historical shares for industry and location
+    industry_shares, location_shares = compute_historical_shares(db)
 
-    # per location
-    location_totals: Dict[str, List[int]] = defaultdict(list)
-    for m in months_sorted:
-        for location, cnt in location_counts_by_month[m].items():
-            location_totals[location].append(cnt)
-    location_forecast: Dict[str, Dict[str, int]] = {}
-    for location, hist in location_totals.items():
-        preds = moving_average_forecast(hist, horizon=horizon_months)
-        location_forecast[location] = {future_months[i]: preds[i] for i in range(horizon_months)}
+    # Step 3: allocate totals by shares, per month
+    industry_forecast: Dict[str, Dict[str, int]] = defaultdict(dict)
+    location_forecast: Dict[str, Dict[str, int]] = defaultdict(dict)
+    for m, total_m in all_forecast.items():
+        ind_alloc = allocate_by_shares(int(total_m), industry_shares)
+        loc_alloc = allocate_by_shares(int(total_m), location_shares)
+        for k, v in ind_alloc.items():
+            industry_forecast[k][m] = v
+        for k, v in loc_alloc.items():
+            location_forecast[k][m] = v
 
+    # Ensure 'All' is available in industry_forecast
+    industry_forecast["All"] = all_forecast
     return industry_forecast, location_forecast
 
 
@@ -160,8 +224,9 @@ def month_pretty(month_str: str) -> str:
 
 
 def forecast_event_volume_by_industry_grouped(db, horizon_months: int = 3) -> Dict[str, int]:
-    # Build historical counts of events per month per industry inferred via ExhibitorProfile → ExhibitorUser.industry
-    by_month_industry: Dict[str, Counter] = defaultdict(Counter)
+    # Build historical counts of UNIQUE events per month per industry inferred via ExhibitorProfile → ExhibitorUser.industry
+    # Use sets of event IDs to avoid double-counting the same event when multiple exhibitors exist
+    by_month_industry_events: Dict[str, Dict[str, set]] = defaultdict(lambda: defaultdict(set))
     exhibitors = {e["_id"]: e for e in db["ExhibitorUser"].find({})}
     events = {e["_id"]: e for e in db["Event"].find({})}
     for xp in db["ExhibitorProfile"].find({}):
@@ -180,25 +245,59 @@ def forecast_event_volume_by_industry_grouped(db, horizon_months: int = 3) -> Di
             continue
         m = month_key(start)
         ind = exhibitor.get("industry", "Unknown")
-        by_month_industry[m][ind] += 1
+        by_month_industry_events[m][ind].add(ev["_id"])
 
-    if not by_month_industry:
+    if not by_month_industry_events:
         return {}
 
-    months_sorted = sorted(by_month_industry.keys())
+    months_sorted = sorted(by_month_industry_events.keys())
     future_months = next_three_months_from_today()
 
-    # Prepare per-industry series
-    series: Dict[str, List[int]] = defaultdict(list)
-    for m in months_sorted:
-        for ind, cnt in by_month_industry[m].items():
-            series[ind].append(cnt)
+    # Compute historical industry shares over the full history (or last 6 months if long)
+    recent_months = months_sorted[-6:] if len(months_sorted) > 6 else months_sorted
+    total_events_hist = 0
+    industry_event_counts: Dict[str, int] = defaultdict(int)
+    for m in recent_months:
+        for ind, evset in by_month_industry_events[m].items():
+            c = len(evset)
+            industry_event_counts[ind] += c
+            total_events_hist += c
+    if total_events_hist == 0:
+        return {}
+    shares = {ind: industry_event_counts[ind] / total_events_hist for ind in industry_event_counts}
 
-    grouped_totals: Dict[str, int] = {}
-    for ind, hist in series.items():
-        preds = moving_average_forecast(hist, horizon=horizon_months)
-        grouped_totals[ind] = sum(preds)
-    return grouped_totals
+    # Get overall forecast per future month and allocate by shares so sums match overall
+    ind_fc, _ = forecast_event_volume(db, horizon_months)
+    all_map = ind_fc.get("All", {})
+
+    def allocate(total: int, weights: Dict[str, float]) -> Dict[str, int]:
+        # Largest remainder method to preserve sum
+        if total <= 0 or not weights:
+            return {k: 0 for k in weights}
+        # normalize
+        s = sum(weights.values())
+        if s == 0:
+            base = {k: 0 for k in weights}
+        else:
+            base = {k: (weights[k] / s) * total for k in weights}
+        floored = {k: int(v) for k, v in base.items()}
+        remainder = total - sum(floored.values())
+        if remainder > 0:
+            # assign by largest fractional parts
+            fracs = sorted(((base[k] - floored[k], k) for k in base), reverse=True)
+            for i in range(remainder):
+                _, kk = fracs[i % len(fracs)]
+                floored[kk] += 1
+        return floored
+
+    grouped_totals: Dict[str, int] = defaultdict(int)
+    for m in future_months:
+        total_m = int(all_map.get(m, 0))
+        alloc = allocate(total_m, shares)
+        for ind, v in alloc.items():
+            grouped_totals[ind] += v
+
+    return dict(grouped_totals)
 
 
 def aggregate_invite_demand(db) -> Dict[str, Counter]:
@@ -280,9 +379,9 @@ def supply_demand_forecast(db, horizon_months: int = 3):
     demand_hist = aggregate_invite_demand(db)
     if not demand_hist:
         return {}
+    # Align to next three months from today
     months_sorted = sorted(demand_hist.keys())
-    last_hist_month = datetime.strptime(months_sorted[-1], "%Y-%m")
-    future_months = upcoming_months(last_hist_month + timedelta(days=1), horizon_months)
+    future_months = next_three_months_from_today()
 
     # Build history per industry
     industry_demand_series: Dict[str, List[int]] = defaultdict(list)
