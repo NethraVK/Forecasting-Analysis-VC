@@ -27,6 +27,11 @@ def upcoming_months(start: datetime, n_months: int = 3) -> List[str]:
     return months
 
 
+def next_three_months_from_today() -> List[str]:
+    today = datetime.today().replace(day=1)
+    return upcoming_months(today, 3)
+
+
 def aggregate_event_volume(db) -> Tuple[Dict[str, Counter], Dict[str, Counter]]:
     industry_counts_by_month: Dict[str, Counter] = defaultdict(Counter)
     location_counts_by_month: Dict[str, Counter] = defaultdict(Counter)
@@ -67,8 +72,8 @@ def forecast_event_volume(db, horizon_months: int = 3):
         return {}, {}
 
     months_sorted = sorted(industry_counts_by_month.keys())
-    last_hist_month = datetime.strptime(months_sorted[-1], "%Y-%m")
-    future_months = upcoming_months(last_hist_month + timedelta(days=1), horizon_months)
+    # Forecast for the next months starting from today
+    future_months = next_three_months_from_today()
 
     # per industry
     industry_totals: Dict[str, List[int]] = defaultdict(list)
@@ -107,8 +112,7 @@ def seasonal_event_volume_summary(db, horizon_months: int = 3) -> Dict[str, str]
     if not ind_by_month:
         return {}
     months_sorted = sorted(ind_by_month.keys())
-    last_hist_month = datetime.strptime(months_sorted[-1], "%Y-%m")
-    future_months = upcoming_months(last_hist_month + timedelta(days=1), horizon_months)
+    future_months = next_three_months_from_today()
 
     # Historical total per month (all industries)
     hist_month_totals = [sum(ind_by_month[m].values()) for m in months_sorted]
@@ -148,6 +152,53 @@ def seasonal_event_volume_summary(db, horizon_months: int = 3) -> Dict[str, str]
         "change_pct": f"{pct:.1f}%",
         "signal": label,
     }
+
+
+def month_pretty(month_str: str) -> str:
+    dt = datetime.strptime(month_str, "%Y-%m")
+    return dt.strftime("%B %Y")
+
+
+def forecast_event_volume_by_industry_grouped(db, horizon_months: int = 3) -> Dict[str, int]:
+    # Build historical counts of events per month per industry inferred via ExhibitorProfile → ExhibitorUser.industry
+    by_month_industry: Dict[str, Counter] = defaultdict(Counter)
+    exhibitors = {e["_id"]: e for e in db["ExhibitorUser"].find({})}
+    events = {e["_id"]: e for e in db["Event"].find({})}
+    for xp in db["ExhibitorProfile"].find({}):
+        exhibitor = exhibitors.get(xp.get("exhibitor"))
+        ev = events.get(xp.get("event"))
+        if not exhibitor or not ev:
+            continue
+        dates = ev.get("dates") or {}
+        start = dates.get("start")
+        if isinstance(start, str):
+            try:
+                start = datetime.fromisoformat(start)
+            except Exception:
+                continue
+        if not start:
+            continue
+        m = month_key(start)
+        ind = exhibitor.get("industry", "Unknown")
+        by_month_industry[m][ind] += 1
+
+    if not by_month_industry:
+        return {}
+
+    months_sorted = sorted(by_month_industry.keys())
+    future_months = next_three_months_from_today()
+
+    # Prepare per-industry series
+    series: Dict[str, List[int]] = defaultdict(list)
+    for m in months_sorted:
+        for ind, cnt in by_month_industry[m].items():
+            series[ind].append(cnt)
+
+    grouped_totals: Dict[str, int] = {}
+    for ind, hist in series.items():
+        preds = moving_average_forecast(hist, horizon=horizon_months)
+        grouped_totals[ind] = sum(preds)
+    return grouped_totals
 
 
 def aggregate_invite_demand(db) -> Dict[str, Counter]:
@@ -277,14 +328,14 @@ def host_onboarding_needs(db) -> List[str]:
 
             if demand > total_avail:
                 recommendations.append(
-                    f"Shortage observed in {m} for {industry}: need {demand - total_avail} more hosts.")
+                    f"Shortage observed in {month_pretty(m)} for {industry}: need {demand - total_avail} more hosts.")
             # ratios
             if demand > 0 and bilingual_avail < max(1, demand // 3):
                 recommendations.append(
-                    f"Bilingual gap in {m} for {industry}: onboard ~{max(0, demand // 3 - bilingual_avail)} bilingual hosts.")
+                    f"Bilingual gap in {month_pretty(m)} for {industry}: onboard ~{max(0, demand // 3 - bilingual_avail)} bilingual hosts.")
             if demand > 0 and exp3_avail < max(1, demand // 4):
                 recommendations.append(
-                    f"Experienced host gap in {m} for {industry}: onboard ~{max(0, demand // 4 - exp3_avail)} hosts with 3+ years.")
+                    f"Experienced host gap in {month_pretty(m)} for {industry}: onboard ~{max(0, demand // 4 - exp3_avail)} hosts with 3+ years.")
     return recommendations
 
 
@@ -296,23 +347,13 @@ def print_report(db):
 
     # Summary line with total and average for next three months (kept in addition to detailed sections)
     all_map = ind_fc.get("All", {})
-    months = []
-    if season and season.get("season"):
-        start, end = season["season"].split("–") if "–" in season["season"] else (season["season"], season["season"])
-        start_dt = datetime.strptime(start, "%Y-%m")
-        end_dt = datetime.strptime(end, "%Y-%m")
-        cur = start_dt
-        while cur <= end_dt:
-            months.append(cur.strftime("%Y-%m"))
-            y = cur.year + (1 if cur.month == 12 else 0)
-            m = 1 if cur.month == 12 else cur.month + 1
-            cur = datetime(y, m, 1)
-    else:
-        months = sorted(all_map.keys())
+    months = next_three_months_from_today()
     total_events = sum(int(all_map.get(m, 0)) for m in months)
     avg_events = round(total_events / max(1, len(months)), 1)
     label = month_range_label(months)
+    per_month_str = ", ".join([f"{month_pretty(m)}: {int(all_map.get(m,0))}" for m in months])
     print(f"Summary: Next three months ({label}): {total_events}+ exhibitions expected (avg {avg_events}/month)")
+    print(f"Per month: {per_month_str}")
 
     print("\n=== Event Volume Forecast (All Industries) ===")
     for industry, m_to_v in sorted(ind_fc.items()):
@@ -326,19 +367,33 @@ def print_report(db):
             f"({season['change_pct']}) → {season['signal']}"
         )
 
+    # Event Volume Forecast by Industries grouped over next three months
+    grouped_industry = forecast_event_volume_by_industry_grouped(db)
+    if grouped_industry:
+        print("\n=== Event Volume Forecast (by Industries) — Next 3 months ===")
+        for ind, total in sorted(grouped_industry.items()):
+            print(f"- {ind}: {total}")
+
     print("\n=== Event Volume Forecast (Location) ===")
     for location, m_to_v in sorted(loc_fc.items()):
         line = ", ".join([f"{m}: {v}" for m, v in m_to_v.items()])
         print(f"- {location}: {line}")
 
-    print("\n=== Supply–Demand Forecast (by Industry) ===")
-    for industry, mstats in sorted(sd.items()):
-        for m, stats in sorted(mstats.items()):
-            print(
-                f"- {industry} {m}: demand={stats['predicted_demand']}, available={stats['available_hosts']} "
-                f"(bilingual={stats['available_bilingual']}, 3+yr={stats['available_exp3plus']}), "
-                f"shortage={stats['shortage_total']}"
-            )
+    print("\n=== Supply–Demand Forecast (by Industry) — Next 3 months ===")
+    # Aggregate over next three months
+    agg_sd: Dict[str, Dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    for industry, mstats in sd.items():
+        for m in months:
+            stats = mstats.get(m)
+            if not stats:
+                continue
+            for key in ["predicted_demand", "available_hosts", "available_bilingual", "available_exp3plus", "shortage_total"]:
+                agg_sd[industry][key] += int(stats.get(key, 0))
+    for industry, agg in sorted(agg_sd.items()):
+        print(
+            f"- {industry} {month_range_label(months)}: demand={agg['predicted_demand']}, available={agg['available_hosts']} "
+            f"(bilingual={agg['available_bilingual']}, 3+yr={agg['available_exp3plus']}), shortage={agg['shortage_total']}"
+        )
 
     print("\n=== Host Onboarding Needs (Recommendations) ===")
     if not recs:
