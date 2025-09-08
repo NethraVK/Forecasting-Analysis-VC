@@ -116,6 +116,10 @@ def build_monthly_df(db=None, scope: str = "industry") -> pd.DataFrame:
     df = df.groupby("key", group_keys=False).apply(lambda g: add_lags_rollings(g, "y_event_count"))
     df = df.groupby("key", group_keys=False).apply(lambda g: add_lags_rollings(g, "y_host_demand"))
 
+    # Same month last year feature for seasonality
+    # Shift by 12 for y_event_count per key
+    df["y_event_count_same_month_ly"] = df.groupby("key")["y_event_count"].shift(12)
+
     # Multi-horizon labels for event count
     df["y_t+1"] = df.groupby("key")["y_event_count"].shift(-1)
     df["y_t+2"] = df.groupby("key")["y_event_count"].shift(-2)
