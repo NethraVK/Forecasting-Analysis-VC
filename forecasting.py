@@ -1,7 +1,6 @@
 from datetime import datetime, timedelta
 from collections import defaultdict, Counter
 from typing import Dict, List, Tuple
-
 from pymongo import MongoClient
 
 
@@ -47,9 +46,6 @@ def aggregate_event_volume(db) -> Tuple[Dict[str, Counter], Dict[str, Counter]]:
             except Exception:
                 continue
         m = month_key(start)
-        # industry now inferred from linked exhibitors via ExhibitorProfile, but for
-        # volume we only need counts, independent of industry. We'll still keep a
-        # placeholder "All" industry for total volume by month.
         industry_counts_by_month[m]["All"] += 1
         location_counts_by_month[m][ev.get("location", "Unknown")] += 1
     return industry_counts_by_month, location_counts_by_month
@@ -224,8 +220,6 @@ def month_pretty(month_str: str) -> str:
 
 
 def forecast_event_volume_by_industry_grouped(db, horizon_months: int = 3) -> Dict[str, int]:
-    # Build historical counts of UNIQUE events per month per industry inferred via ExhibitorProfile → ExhibitorUser.industry
-    # Use sets of event IDs to avoid double-counting the same event when multiple exhibitors exist
     by_month_industry_events: Dict[str, Dict[str, set]] = defaultdict(lambda: defaultdict(set))
     exhibitors = {e["_id"]: e for e in db["ExhibitorUser"].find({})}
     events = {e["_id"]: e for e in db["Event"].find({})}
@@ -373,7 +367,6 @@ def available_hosts_summary(db) -> Dict[str, Dict[str, int]]:
                 if is_exp3:
                     summary[(m, ind)]["exp3plus"] += 1
     return summary
-
 
 def supply_demand_forecast(db, horizon_months: int = 3):
     demand_hist = aggregate_invite_demand(db)

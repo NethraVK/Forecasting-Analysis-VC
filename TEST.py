@@ -27,7 +27,7 @@ def rand_phone():
 
 # ---------- ExhibitorUser Collection ----------
 exhibitors = []
-for i in range(1, 11):
+for i in range(1, 81):  # 80 exhibitors across industries
     industry = random.choice(industries)
     exhibitors.append({
         "_id": f"X{i}",
@@ -48,44 +48,60 @@ db["ExhibitorUser"].insert_many(exhibitors)
 
 # ---------- Event Collection ----------
 events = []
-for i in range(1, 11):
-    start = datetime(2025, random.randint(1, 12), random.randint(1, 25))
-    end = start + timedelta(days=random.randint(1, 3))
-    status = random.choice(["Upcoming", "Ongoing", "Ended"])
-    events.append({
-        "_id": f"E{i}",
-        "name": f"Event {i}",
-        "dates": {"start": start, "end": end},
-        "location": random.choice(locations),
-        "description": f"Description for event {i}",
-        "status": status,
-        "participants": []  # list of EventHostUser ids, will be filled by invites
-    })
+today = datetime.today().replace(day=1)
+# generate ~12 months of events ending this month (10 events per month)
+event_id = 1
+for m_offset in range(12, -1, -1):  # past 12 months to current
+    month_dt = (today - timedelta(days=30*m_offset)).replace(day=1)
+    for _ in range(10):
+        start_day = random.randint(1, 25)
+        start = month_dt.replace(day=min(start_day, 28))
+        end = start + timedelta(days=random.randint(1, 3))
+        # derive status relative to today
+        if end < datetime.today():
+            status = "Ended"
+        elif start > datetime.today():
+            status = "Upcoming"
+        else:
+            status = "Ongoing"
+        events.append({
+            "_id": f"E{event_id}",
+            "name": f"Event {event_id}",
+            "dates": {"start": start, "end": end},
+            "location": random.choice(locations),
+            "description": f"Description for event {event_id}",
+            "status": status,
+            "participants": []
+        })
+        event_id += 1
 db["Event"].insert_many(events)
 
 # ---------- ExhibitorProfile Collection ----------
 exhibitor_profiles = []
-for i, exhibitor in enumerate(exhibitors, start=1):
-    ev_id = f"E{((i - 1) % 10) + 1}"
-    event = next(e for e in events if e["_id"] == ev_id)
-    event_date = event["dates"]["start"].strftime("%Y-%m-%d")
-    exhibitor_profiles.append({
-        "_id": f"XP{i}",
-        "exhibitor": exhibitor["_id"],
-        "event": ev_id,
-        "eventName": event["name"],
-        "eventDate": event_date,
-        "boothInfo": {"size": random.choice(["S", "M", "L"])},
-        "hostessRequirements": random.randint(1, 6),
-        "contactInfo": {"email": exhibitor["contactEmail"], "phone": exhibitor["phone"]},
-        "representativePhoto": None,
-        "businessCard": None
-    })
+xp_id = 1
+for ev in events:
+    # 1-4 exhibitors per event
+    for _ in range(random.randint(1, 4)):
+        exhibitor = random.choice(exhibitors)
+        event_date = ev["dates"]["start"].strftime("%Y-%m-%d")
+        exhibitor_profiles.append({
+            "_id": f"XP{xp_id}",
+            "exhibitor": exhibitor["_id"],
+            "event": ev["_id"],
+            "eventName": ev["name"],
+            "eventDate": event_date,
+            "boothInfo": {"size": random.choice(["S", "M", "L"])},
+            "hostessRequirements": random.randint(1, 8),
+            "contactInfo": {"email": exhibitor["contactEmail"], "phone": exhibitor["phone"]},
+            "representativePhoto": None,
+            "businessCard": None
+        })
+        xp_id += 1
 db["ExhibitorProfile"].insert_many(exhibitor_profiles)
 
 # ---------- EventHostUser Collection ----------
 hosts = []
-for i in range(1, 21):
+for i in range(1, 101):  # 100 hosts
     hosts.append({
         "_id": f"H{i}",
         "fullName": f"Host {i}",
@@ -119,11 +135,13 @@ db["EventHostProfile"].insert_many([
 # ---------- UnavailableDate Collection ----------
 unavailable = []
 for h in hosts:
-    # 2 random unavailable dates in 2025
-    for _ in range(2):
-        d = datetime(2025, random.randint(1, 12), random.randint(1, 28)).strftime("%Y-%m-%d")
+    # 6 random unavailable dates over the past year
+    for j in range(6):
+        month_offset = random.randint(0, 12)
+        base = today - timedelta(days=30*month_offset)
+        d = base.replace(day=random.randint(1, 28)).strftime("%Y-%m-%d")
         unavailable.append({
-            "_id": f"U{h['_id']}-{_}",
+            "_id": f"U{h['_id']}-{j}",
             "eventHost": h["_id"],
             "dates": [d],
             "createdAt": datetime.utcnow()
@@ -135,8 +153,8 @@ invites = []
 for i, xp in enumerate(exhibitor_profiles, start=1):
     ev_id = xp["event"]
     exhibitor_id = xp["exhibitor"]
-    # Invite between 1-3 hosts
-    for j in range(random.randint(1, 3)):
+    # Invite between 1-5 hosts
+    for j in range(random.randint(1, 5)):
         host_id = random.choice(hosts)["_id"]
         invites.append({
             "_id": f"INV{i}-{j+1}",
