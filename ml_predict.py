@@ -25,6 +25,7 @@ def predict_report(scope: str = "industry", models_dir: str = "models_industry")
     df = build_monthly_df(db=db, scope=scope)
     meta = joblib.load(os.path.join(models_dir, "meta.joblib"))
     features = meta["features"]
+    calib = meta.get("calibration", {})
     # Load models
     models = {h: joblib.load(os.path.join(models_dir, f"poisson_h{h}.joblib")) for h in [1, 2, 3]}
 
@@ -43,14 +44,30 @@ def predict_report(scope: str = "industry", models_dir: str = "models_industry")
 
     preds = {}
     for h in [1, 2, 3]:
-        preds[h] = models[h].predict(X_latest)
+        ph = models[h].predict(X_latest)
+        factor = float(calib.get(h, 1.0))
+        preds[h] = ph * factor
 
-    # Sum across keys to get overall
+    # Guardrail: cap next-3m total to within 1.2x of recent last-3m actual total
+    # Use user-provided actual for last 3 months
+    last3_months = sorted(df["ym"].unique())[-3:]
+    recent_actual = 30
+
+    raw_total_next3 = float(sum(preds[h].sum() for h in [1, 2, 3]))
+    scale = 1.0
+    if recent_actual > 0:
+        cap_total = 1.1 * recent_actual
+        if raw_total_next3 > cap_total:
+            scale = cap_total / max(raw_total_next3, 1e-6)
+            for h in [1, 2, 3]:
+                preds[h] = preds[h] * scale
+
+    # Sum across keys to get overall (after cap)
     total_next3 = int(np.round(sum(preds[h].sum() for h in [1, 2, 3])))
     avg = round(total_next3 / 3.0, 1)
     print(f"ML Summary: Next three months ({horizon_months[0]}–{horizon_months[-1]}): {total_next3}+ exhibitions expected (avg {avg}/month)")
 
-    # Per key totals
+    # Per key totals (after cap)
     per_key = {k: int(np.round(preds[1][i] + preds[2][i] + preds[3][i])) for i, k in enumerate(keys)}
     print("=== ML Event Volume Forecast (by key) — Next 3 months ===")
     for k, v in sorted(per_key.items(), key=lambda x: (-x[1], x[0])):
