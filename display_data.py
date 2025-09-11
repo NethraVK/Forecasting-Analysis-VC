@@ -10,7 +10,6 @@ events = list(db["Event"].find({}))
 
 # Convert to DataFrame
 df = pd.DataFrame(events)
-
 pd.set_option("display.max_rows", None)     # show rows
 pd.set_option("display.max_columns", None)  # show columns
 print(df)
