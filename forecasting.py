@@ -31,6 +31,11 @@ def next_three_months_from_today() -> List[str]:
     return upcoming_months(today, 3)
 
 
+def next_n_months_from_today(n: int) -> List[str]:
+    today = datetime.today().replace(day=1)
+    return upcoming_months(today, max(1, int(n)))
+
+
 def aggregate_event_volume(db) -> Tuple[Dict[str, Counter], Dict[str, Counter]]:
     industry_counts_by_month: Dict[str, Counter] = defaultdict(Counter)
     location_counts_by_month: Dict[str, Counter] = defaultdict(Counter)
@@ -429,6 +434,45 @@ def host_onboarding_needs(db) -> List[str]:
                 recommendations.append(
                     f"Experienced host gap in {month_pretty(m)} for {industry}: onboard ~{max(0, demand // 4 - exp3_avail)} hosts with 3+ years.")
     return recommendations
+
+
+def host_onboarding_needs_from_forecast(supply_demand: Dict[str, Dict[str, Dict[str, int]]], months: List[str]) -> List[str]:
+    # Generate onboarding recommendations constrained to the provided future months using forecasted shortages
+    recommendations: List[str] = []
+    months_set = set(months or [])
+    for industry, month_stats in supply_demand.items():
+        for m, stats in month_stats.items():
+            if months_set and m not in months_set:
+                continue
+            demand = int(stats.get("predicted_demand", 0))
+            total_avail = int(stats.get("available_hosts", 0))
+            bilingual_avail = int(stats.get("available_bilingual", 0))
+            exp3_avail = int(stats.get("available_exp3plus", 0))
+
+            shortage = max(0, demand - total_avail)
+            if shortage > 0:
+                recommendations.append(
+                    f"Forecasted shortage in {month_pretty(m)} for {industry}: need {shortage} more hosts.")
+
+            if demand > 0:
+                required_bilingual = max(1, demand // 3)
+                if bilingual_avail < required_bilingual:
+                    recommendations.append(
+                        f"Bilingual gap in {month_pretty(m)} for {industry}: onboard ~{required_bilingual - bilingual_avail} bilingual hosts.")
+
+                required_exp3 = max(1, demand // 4)
+                if exp3_avail < required_exp3:
+                    recommendations.append(
+                        f"Experienced host gap in {month_pretty(m)} for {industry}: onboard ~{required_exp3 - exp3_avail} hosts with 3+ years.")
+
+    # Optional: deduplicate messages
+    dedup = []
+    seen = set()
+    for r in recommendations:
+        if r not in seen:
+            dedup.append(r)
+            seen.add(r)
+    return dedup
 
 
 def print_report(db):
