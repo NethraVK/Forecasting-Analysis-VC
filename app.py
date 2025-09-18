@@ -14,13 +14,13 @@ horizon = st.slider("Forecast Horizon (months)", 1, 3, 3)
 months = forecasting.next_n_months_from_today(horizon)
 
 # Compute forecasts
-ind_fc, loc_fc = forecasting.forecast_event_volume(db, horizon_months=horizon)
+ind_fc, _ = forecasting.forecast_event_volume(db, horizon_months=horizon)
 sd = forecasting.supply_demand_forecast(db, horizon_months=horizon)
 grouped_industry = forecasting.forecast_event_volume_by_industry_grouped(db, horizon_months=horizon)
 season = forecasting.seasonal_event_volume_summary(db, horizon_months=horizon)
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
-    "Summary", "Events by Industry", "Events by Location", "Supply–Demand", "Onboarding"
+tab1, tab2, tab3, tab4 = st.tabs([
+    "Summary", "Events by Industry", "Supply–Demand", "Onboarding"
 ])
 
 with tab1:
@@ -40,29 +40,9 @@ with tab2:
     ind_df = pd.DataFrame.from_dict(grouped_industry, orient="index", columns=["events_next_window"]).sort_values("events_next_window", ascending=False)
     st.subheader(f"Events by Industry (next {horizon} months)")
     st.bar_chart(ind_df)
-    # Per-month industry breakdown table
-    st.caption("Per-month breakdown")
-    pm_rows = []
-    for industry, m_to_v in ind_fc.items():
-        if industry == "All":
-            continue
-        for m in months:
-            pm_rows.append({"industry": industry, "month": m, "events": int(m_to_v.get(m, 0))})
-    if pm_rows:
-        st.dataframe(pd.DataFrame(pm_rows), use_container_width=True)
+    # Removed per-month breakdown table per request
 
 with tab3:
-    # Location per-month forecast
-    loc_rows = []
-    for loc, m_to_v in loc_fc.items():
-        for m in months:
-            loc_rows.append({"location": loc, "month": m, "events": int(m_to_v.get(m, 0))})
-    if loc_rows:
-        loc_df = pd.DataFrame(loc_rows)
-        st.subheader(f"Events by Location (next {horizon} months)")
-        st.bar_chart(loc_df.pivot(index="month", columns="location", values="events").fillna(0))
-
-with tab4:
     # Aggregate next N months per industry for supply–demand
     agg_sd = {}
     for industry, mstats in sd.items():
@@ -77,10 +57,9 @@ with tab4:
     if agg_sd:
         sd_df = pd.DataFrame.from_dict(agg_sd, orient="index")
         st.subheader(f"Supply–Demand by Industry (next {horizon} months)")
-        st.dataframe(sd_df, use_container_width=True)
         st.bar_chart(sd_df[["predicted_demand", "available_hosts"]])
 
-with tab5:
+with tab4:
     st.subheader(f"Onboarding Recommendations (next {horizon} months)")
     # Build tabular view of gaps by industry and month
     gap_rows = []
@@ -107,9 +86,7 @@ with tab5:
         st.write("No critical gaps detected.")
     else:
         gap_df = pd.DataFrame(gap_rows)
-        st.dataframe(gap_df.sort_values(["shortage", "exp3plus_gap"], ascending=False), use_container_width=True)
-
-        # Charts
+        # Charts only (no tables)
         st.markdown("**Shortage by industry (stacked by month)**")
         shortage_pivot = gap_df.pivot(index="industry", columns="month", values="shortage").fillna(0)
         st.bar_chart(shortage_pivot)
