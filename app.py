@@ -89,12 +89,9 @@ with tab5:
             stats = month_stats.get(m, {})
             demand = int(stats.get("predicted_demand", 0))
             avail = int(stats.get("available_hosts", 0))
-            bilingual_avail = int(stats.get("available_bilingual", 0))
             exp3_avail = int(stats.get("available_exp3plus", 0))
             shortage = max(0, demand - avail)
-            required_bilingual = max(1, demand // 3) if demand > 0 else 0
             required_exp3 = max(1, demand // 4) if demand > 0 else 0
-            bilingual_gap = max(0, required_bilingual - bilingual_avail)
             exp3_gap = max(0, required_exp3 - exp3_avail)
             gap_rows.append({
                 "industry": industry,
@@ -102,9 +99,6 @@ with tab5:
                 "predicted_demand": demand,
                 "available_hosts": avail,
                 "shortage": shortage,
-                "required_bilingual": required_bilingual,
-                "available_bilingual": bilingual_avail,
-                "bilingual_gap": bilingual_gap,
                 "required_exp3plus": required_exp3,
                 "available_exp3plus": exp3_avail,
                 "exp3plus_gap": exp3_gap,
@@ -113,15 +107,15 @@ with tab5:
         st.write("No critical gaps detected.")
     else:
         gap_df = pd.DataFrame(gap_rows)
-        st.dataframe(gap_df.sort_values(["shortage", "bilingual_gap", "exp3plus_gap"], ascending=False), use_container_width=True)
+        st.dataframe(gap_df.sort_values(["shortage", "exp3plus_gap"], ascending=False), use_container_width=True)
 
         # Charts
         st.markdown("**Shortage by industry (stacked by month)**")
         shortage_pivot = gap_df.pivot(index="industry", columns="month", values="shortage").fillna(0)
         st.bar_chart(shortage_pivot)
 
-        st.markdown("**Skill gaps by industry (bilingual vs 3+ years)**")
+        st.markdown("**Experienced (3+ years) gap by industry**")
         skill_gaps = (
-            gap_df.groupby("industry")[["bilingual_gap", "exp3plus_gap"]].sum().sort_values("bilingual_gap", ascending=False)
+            gap_df.groupby("industry")[ ["exp3plus_gap"] ].sum().sort_values("exp3plus_gap", ascending=False)
         )
         st.bar_chart(skill_gaps)

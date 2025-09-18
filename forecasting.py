@@ -446,7 +446,6 @@ def host_onboarding_needs_from_forecast(supply_demand: Dict[str, Dict[str, Dict[
                 continue
             demand = int(stats.get("predicted_demand", 0))
             total_avail = int(stats.get("available_hosts", 0))
-            bilingual_avail = int(stats.get("available_bilingual", 0))
             exp3_avail = int(stats.get("available_exp3plus", 0))
 
             shortage = max(0, demand - total_avail)
@@ -455,11 +454,7 @@ def host_onboarding_needs_from_forecast(supply_demand: Dict[str, Dict[str, Dict[
                     f"Forecasted shortage in {month_pretty(m)} for {industry}: need {shortage} more hosts.")
 
             if demand > 0:
-                required_bilingual = max(1, demand // 3)
-                if bilingual_avail < required_bilingual:
-                    recommendations.append(
-                        f"Bilingual gap in {month_pretty(m)} for {industry}: onboard ~{required_bilingual - bilingual_avail} bilingual hosts.")
-
+                # Only predict experienced (3+ years) gap; skip bilingual gap per requirement
                 required_exp3 = max(1, demand // 4)
                 if exp3_avail < required_exp3:
                     recommendations.append(
