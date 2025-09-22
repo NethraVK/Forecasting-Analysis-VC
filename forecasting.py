@@ -288,13 +288,14 @@ def build_monthly_df(db=None, scope: str = "industry") -> pd.DataFrame:
               .reset_index().rename(columns={"hostessRequirements": "y_host_demand"}))
     df = ev_counts.merge(demand, on=["ym", key_col], how="left").fillna({"y_host_demand": 0})
 
-    # Weighted availability per month combining:
-    #  - accepted invites (distinct hosts) [high priority]
-    #  - remaining qualified pool (60% of total) [baseline]
-    #  - pending non-qualified invites [fallback]
+    # Availability per month as a probabilistic blend:
+    #  - accepted invites (distinct hosts): 100%
+    #  - pending invites: 50% probability
+    #  - non-invited qualified pool: 30% probability from remaining qualified (assume 70% of total hosts qualified)
     ev_month_map = {row["event_id"]: row["ym"] for _, row in ev_df.iterrows()}
     accepted_by_month: Dict[str, set] = {}
     pending_by_month: Dict[str, set] = {}
+    invited_any_by_month: Dict[str, set] = {}
     for inv in db["EventInvite"].find({}):
         status = (inv.get("status") or "").lower()
         ev_id = inv.get("event")
@@ -306,6 +307,8 @@ def build_monthly_df(db=None, scope: str = "industry") -> pd.DataFrame:
             accepted_by_month.setdefault(ym, set()).add(host_id)
         elif status == "pending":
             pending_by_month.setdefault(ym, set()).add(host_id)
+        # track all invited hosts regardless of status
+        invited_any_by_month.setdefault(ym, set()).add(host_id)
 
     # Consider explicit unavailability if present
     unavail = list(db["UnavailableDate"].find({}))
@@ -323,26 +326,24 @@ def build_monthly_df(db=None, scope: str = "industry") -> pd.DataFrame:
     # Do NOT rely on any qualified tagging in data; use 70% estimate
     assumed_qualified_total = int(round(total_hosts * 0.7))
 
-    # Weights (must sum to 1.0):
-    #  - accepted invites: 0.35
-    #  - remaining qualified pool: 0.50
-    #  - pending non-qualified: 0.15
-    w_accepted = 0.35
-    w_remaining_qualified = 0.50
-    w_pending_nonqualified = 0.15
+    # Probabilities/weights (not required to sum to 1; they are contribution factors):
+    p_accepted = 1.0
+    p_pending = 0.5
+    p_noninv_qualified = 0.3
 
     def _avail_for_month(m: str) -> int:
         accepted = len(accepted_by_month.get(m, set()))
-        pending_hosts = pending_by_month.get(m, set())
-        # remaining qualified pool avoids double count of accepted
-        remaining_qualified = max(0, assumed_qualified_total - accepted)
-        # We don't know who is qualified; treat a 30% share of pending as non-qualified
-        pending_nonqualified = int(round(len(pending_hosts) * 0.3))
-        blended = int(round(
-            w_accepted * accepted +
-            w_remaining_qualified * remaining_qualified +
-            w_pending_nonqualified * pending_nonqualified
-        ))
+        pending = len(pending_by_month.get(m, set()))
+        invited_any = len(invited_any_by_month.get(m, set()))
+        # Remaining qualified not invited this month (avoid double counting anyone invited)
+        remaining_qualified = max(0, assumed_qualified_total - invited_any)
+        # Expected available count using probabilities
+        expected_available = (
+            p_accepted * accepted +
+            p_pending * pending +
+            p_noninv_qualified * remaining_qualified
+        )
+        blended = int(round(expected_available))
         # cap at total hosts
         blended = min(blended, total_hosts)
         # reduce by explicit unavailability
