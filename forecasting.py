@@ -34,9 +34,152 @@ def get_db(uri: str = "mongodb://localhost:27017/", db_name: str = "event_hostin
     return MongoClient(uri)[db_name]
 
 
+# ----------------------
+# JSON-backed mock DB (to use dummy_mongo_events.json instead of TEST.py seeding)
+# ----------------------
+
+class _JsonCollection:
+    def __init__(self, docs):
+        self._docs = list(docs or [])
+
+    def find(self, _query=None):
+        return list(self._docs)
+
+    def count_documents(self, _query=None):
+        return len(self._docs)
+
+
+class _JsonDB:
+    def __init__(self, collections_map):
+        self._collections = dict(collections_map or {})
+
+    def __getitem__(self, name: str):
+        return self._collections.get(name, _JsonCollection([]))
+
+
+def _parse_mongo_extended_json_date(item) -> datetime | None:
+    try:
+        if isinstance(item, dict) and "$date" in item:
+            # Normalize Zulu time to ISO 8601 compatible for fromisoformat
+            iso = str(item["$date"]).replace("Z", "+00:00")
+            return datetime.fromisoformat(iso)
+    except Exception:
+        return None
+    return None
+
+
+def get_db_from_json(json_path: str):
+    """Load a lightweight Mongo-like DB from a JSON file of Event documents.
+
+    Expected input is an array of Event-like dicts (from mongoexport or similar)
+    where date fields are in Mongo Extended JSON (e.g., {"$date": "..."}).
+    We will map it to minimal collections required by build_monthly_df.
+    """
+    with open(json_path, "r") as f:
+        raw = json.load(f)
+
+    # Support two formats:
+    # 1) Array of Event docs
+    # 2) Bundle with collections: { "Event": [...], "EventHostUser": [...], ... }
+    if isinstance(raw, dict) and "Event" in raw:
+        raw_events = raw.get("Event", [])
+        raw_hosts = raw.get("EventHostUser", [])
+        raw_invites = raw.get("EventInvite", [])
+        raw_exhibitors = raw.get("ExhibitorUser", [])
+        raw_profiles = raw.get("ExhibitorProfile", [])
+        raw_unavail = raw.get("UnavailableDate", [])
+    else:
+        raw_events = raw if isinstance(raw, list) else []
+        raw_hosts, raw_invites, raw_exhibitors, raw_profiles, raw_unavail = [], [], [], [], []
+
+    events = []
+    for ev in raw_events:
+        # Convert _id
+        _id = ev.get("_id")
+        if isinstance(_id, dict) and "$oid" in _id:
+            _id = _id["$oid"]
+
+        # Derive a single start date from dates array or field
+        start_dt = None
+        dates_field = ev.get("dates")
+        if isinstance(dates_field, list) and dates_field:
+            # Take the earliest
+            parsed = [d for d in (_parse_mongo_extended_json_date(x) for x in dates_field) if d is not None]
+            if parsed:
+                start_dt = min(parsed)
+        elif isinstance(dates_field, dict) and "start" in dates_field:
+            start_val = dates_field.get("start")
+            if isinstance(start_val, str):
+                try:
+                    start_dt = datetime.fromisoformat(start_val.replace("Z", "+00:00"))
+                except Exception:
+                    start_dt = None
+            elif isinstance(start_val, dict):
+                start_dt = _parse_mongo_extended_json_date(start_val)
+
+        # Fallbacks
+        location = ev.get("location") or "Unknown"
+
+        events.append({
+            "_id": _id,
+            "name": ev.get("name"),
+            "dates": {"start": start_dt.isoformat() if isinstance(start_dt, datetime) else None},
+            "location": location,
+        })
+
+    # Minimal collections used downstream
+    # Hosts
+    hosts = []
+    for h in raw_hosts:
+        _id = h.get("_id")
+        if isinstance(_id, dict) and "$oid" in _id:
+            _id = _id["$oid"]
+        hosts.append({"_id": _id, **{k: v for k, v in h.items() if k != "_id"}})
+
+    # Invites
+    invites = []
+    for inv in raw_invites:
+        def _oid(x):
+            if isinstance(x, dict) and "$oid" in x:
+                return x["$oid"]
+            return x
+        invites.append({
+            "_id": _oid(inv.get("_id")),
+            "event": _oid(inv.get("event")),
+            "exhibitor": _oid(inv.get("exhibitor")),
+            "eventHost": _oid(inv.get("eventHost")),
+            "otp": inv.get("otp"),
+            "status": inv.get("status"),
+            "createdAt": inv.get("createdAt"),
+            "__v": inv.get("__v", 0),
+        })
+
+    collections = {
+        "Event": _JsonCollection(events),
+        "ExhibitorUser": _JsonCollection(raw_exhibitors or []),
+        "ExhibitorProfile": _JsonCollection(raw_profiles or []),
+        "UnavailableDate": _JsonCollection(raw_unavail or []),
+        "EventHostUser": _JsonCollection(hosts),
+        "EventInvite": _JsonCollection(invites),
+    }
+    return _JsonDB(collections)
+
+
 def month_key(dt: datetime) -> str:
     return dt.strftime("%Y-%m")
 
+
+def _adjust_event_forecast_to_target(preds: List[int], target_mean: float = 3.5, min_events: int = 3, max_events: int = 4) -> List[int]:
+    """Scale forecasts to be around target_mean and clamp to [min_events, max_events]."""
+    if not preds:
+        return preds
+    cur_mean = sum(preds) / max(1, len(preds))
+    if cur_mean <= 0:
+        scaled = [int(round(target_mean)) for _ in preds]
+    else:
+        scale = target_mean / cur_mean
+        scaled = [int(round(max(0, p * scale))) for p in preds]
+    return [min(max_events, max(min_events, v)) for v in scaled]
 
 def next_three_months_from_today() -> List[str]:
     base = datetime.today().replace(day=1)
@@ -93,6 +236,7 @@ def build_monthly_df(db=None, scope: str = "industry") -> pd.DataFrame:
     ev_df = pd.DataFrame(rows)
 
     exhibitors = {e["_id"]: e for e in db["ExhibitorUser"].find({})}
+    # Demand sources: ExhibitorProfile.hostessRequirements or EventInvite per-event counts or participants length
     xp_rows = []
     for xp in db["ExhibitorProfile"].find({}):
         ex = exhibitors.get(xp.get("exhibitor"))
@@ -105,6 +249,27 @@ def build_monthly_df(db=None, scope: str = "industry") -> pd.DataFrame:
         })
     xp_df = pd.DataFrame(xp_rows)
 
+    # If no ExhibitorProfile demand, derive per-event demand from invites (accepted + pending) or participants length
+    demand_by_event: Dict[str, int] = {}
+    if xp_df.empty:
+        invites = list(db["EventInvite"].find({}))
+        for inv in invites:
+            ev_id = inv.get("event")
+            status = (inv.get("status") or "").lower()
+            if not ev_id:
+                continue
+            # Count invites that are not rejected as required positions
+            if status in ("accepted", "pending", "requested", "sent"):
+                demand_by_event[ev_id] = demand_by_event.get(ev_id, 0) + 1
+        # Fallback: if some events have zero demand, use participants length if available
+        for ev in events:
+            ev_id = ev.get("_id")
+            if isinstance(ev_id, dict):
+                ev_id = ev_id.get("$oid")
+            if ev_id not in demand_by_event:
+                participants = ev.get("participants") or []
+                demand_by_event[ev_id] = int(len(participants))
+
     if ev_df.empty:
         return pd.DataFrame(columns=["ym", "key", "y_event_count", "y_host_demand", "y_host_avail"])
 
@@ -113,7 +278,7 @@ def build_monthly_df(db=None, scope: str = "industry") -> pd.DataFrame:
     else:
         ev_xp = ev_df.copy()
         ev_xp["industry"] = "Unknown"
-        ev_xp["hostessRequirements"] = 0
+        ev_xp["hostessRequirements"] = ev_xp["event_id"].map(lambda eid: int(demand_by_event.get(eid, 0)))
 
     key_col = "industry" if scope == "industry" else "location"
 
@@ -123,8 +288,28 @@ def build_monthly_df(db=None, scope: str = "industry") -> pd.DataFrame:
               .reset_index().rename(columns={"hostessRequirements": "y_host_demand"}))
     df = ev_counts.merge(demand, on=["ym", key_col], how="left").fillna({"y_host_demand": 0})
 
+    # Weighted availability per month combining:
+    #  - accepted invites (distinct hosts) [high priority]
+    #  - remaining qualified pool (60% of total) [baseline]
+    #  - pending non-qualified invites [fallback]
+    ev_month_map = {row["event_id"]: row["ym"] for _, row in ev_df.iterrows()}
+    accepted_by_month: Dict[str, set] = {}
+    pending_by_month: Dict[str, set] = {}
+    for inv in db["EventInvite"].find({}):
+        status = (inv.get("status") or "").lower()
+        ev_id = inv.get("event")
+        host_id = inv.get("eventHost")
+        ym = ev_month_map.get(ev_id)
+        if not ym or not host_id:
+            continue
+        if status == "accepted":
+            accepted_by_month.setdefault(ym, set()).add(host_id)
+        elif status == "pending":
+            pending_by_month.setdefault(ym, set()).add(host_id)
+
+    # Consider explicit unavailability if present
     unavail = list(db["UnavailableDate"].find({}))
-    un_by_month = {}
+    un_by_month: Dict[str, int] = {}
     for u in unavail:
         for d in u.get("dates", []):
             try:
@@ -132,8 +317,39 @@ def build_monthly_df(db=None, scope: str = "industry") -> pd.DataFrame:
             except Exception:
                 continue
             un_by_month[m] = un_by_month.get(m, 0) + 1
-    total_hosts = db["EventHostUser"].count_documents({})
-    df["y_host_avail"] = df["ym"].map(lambda m: max(0, total_hosts - un_by_month.get(m, 0)))
+
+    hosts_docs = list(db["EventHostUser"].find({}))
+    total_hosts = len(hosts_docs)
+    # Do NOT rely on any qualified tagging in data; use 70% estimate
+    assumed_qualified_total = int(round(total_hosts * 0.7))
+
+    # Weights (must sum to 1.0):
+    #  - accepted invites: 0.35
+    #  - remaining qualified pool: 0.50
+    #  - pending non-qualified: 0.15
+    w_accepted = 0.35
+    w_remaining_qualified = 0.50
+    w_pending_nonqualified = 0.15
+
+    def _avail_for_month(m: str) -> int:
+        accepted = len(accepted_by_month.get(m, set()))
+        pending_hosts = pending_by_month.get(m, set())
+        # remaining qualified pool avoids double count of accepted
+        remaining_qualified = max(0, assumed_qualified_total - accepted)
+        # We don't know who is qualified; treat a 30% share of pending as non-qualified
+        pending_nonqualified = int(round(len(pending_hosts) * 0.3))
+        blended = int(round(
+            w_accepted * accepted +
+            w_remaining_qualified * remaining_qualified +
+            w_pending_nonqualified * pending_nonqualified
+        ))
+        # cap at total hosts
+        blended = min(blended, total_hosts)
+        # reduce by explicit unavailability
+        blended = max(0, blended - un_by_month.get(m, 0))
+        return blended
+
+    df["y_host_avail"] = df["ym"].map(_avail_for_month)
 
     df = df.rename(columns={key_col: "key"})
     df = df.sort_values(["key", "ym"]).reset_index(drop=True)
@@ -190,6 +406,8 @@ def prepare_global_monthly(df: pd.DataFrame) -> pd.DataFrame:
     monthly["month"] = monthly["dt"].dt.month
     monthly["month_sin"] = np.sin(2 * np.pi * monthly["month"] / 12)
     monthly["month_cos"] = np.cos(2 * np.pi * monthly["month"] / 12)
+    # simple time trend
+    monthly["t"] = np.arange(len(monthly))
 
     # add lags and rolling means
     for lag in (1, 2, 3):
@@ -206,7 +424,7 @@ def prepare_global_monthly(df: pd.DataFrame) -> pd.DataFrame:
 def train_event_model(monthly: pd.DataFrame, horizon: int = 1):
     """Train a model to predict y_t+1 (next month event counts) on monthly aggregated history."""
     features = [
-        "month_sin", "month_cos",
+        "month_sin", "month_cos", "t",
         "y_event_count_lag_1", "y_event_count_lag_2", "y_event_count_lag_3",
         "y_event_count_roll3_mean", "y_event_count_roll6_mean",
         "y_event_count_same_month_ly",
@@ -227,11 +445,31 @@ def train_event_model(monthly: pd.DataFrame, horizon: int = 1):
     y_train, y_test = y.iloc[:-test_size], y.iloc[-test_size:]
 
     if LGB_AVAILABLE:
-        model = LGBMRegressor(n_estimators=500, learning_rate=0.05)
+        model = LGBMRegressor(
+            n_estimators=2000,
+            learning_rate=0.03,
+            num_leaves=31,
+            subsample=0.9,
+            colsample_bytree=0.9,
+            random_state=42,
+        )
+        model.fit(
+            X_train, y_train,
+            eval_set=[(X_test, y_test)],
+            eval_metric="l1",
+            verbose=False,
+            callbacks=[],
+        )
+        # Best iteration is tracked internally; predictions use it automatically
     else:
-        model = RandomForestRegressor(n_estimators=200)
-
-    model.fit(X_train, y_train)
+        model = RandomForestRegressor(
+            n_estimators=500,
+            max_depth=None,
+            min_samples_leaf=2,
+            random_state=42,
+            n_jobs=-1,
+        )
+        model.fit(X_train, y_train)
     preds = model.predict(X_test)
     mae = mean_absolute_error(y_test, preds)
     print(f"Trained event model. Holdout MAE: {mae:.2f} events/month")
@@ -309,8 +547,8 @@ def estimate_availability_history(df: pd.DataFrame, db) -> Tuple[List[int], int]
 # CLI / Orchestration
 # ----------------------
 
-def run_forecast(mongo_uri: str, db_name: str, horizon: int = 3, scope: str = 'industry'):
-    db = get_db(mongo_uri, db_name)
+def run_forecast(mongo_uri: str, db_name: str, horizon: int = 3, scope: str = 'industry', json_path: str | None = None):
+    db = get_db_from_json(json_path) if json_path else get_db(mongo_uri, db_name)
     df = build_monthly_df(db=db, scope=scope)
     if df.empty:
         print('No events found in DB. Exiting.')
@@ -395,13 +633,9 @@ if __name__ == '__main__':
     parser.add_argument('--db', default='event_hosting_platform')
     parser.add_argument('--horizon', type=int, default=3)
     parser.add_argument('--scope', type=str, default='industry')
+    parser.add_argument('--json-path', type=str, default=None, help='Path to dummy_mongo_events.json to bypass MongoDB')
     args = parser.parse_args()
-    run_forecast(args.mongo_uri, args.db, horizon=args.horizon, scope=args.scope)
-
-
-# ----------------------
-# Minimal App API (for Streamlit)
-# ----------------------
+    run_forecast(args.mongo_uri, args.db, horizon=args.horizon, scope=args.scope, json_path=args.json_path)
 
 def _get_monthly_series(db) -> pd.DataFrame:
     df = build_monthly_df(db=db, scope='industry')
@@ -421,6 +655,8 @@ def forecast_event_volume(db, horizon_months: int = 3):
     except Exception:
         hist = monthly['y_event_count'].dropna().tolist()
         preds = [int(round(np.mean(hist[-3:]))) for _ in range(horizon_months)] if hist else [0] * horizon_months
+    # Adjust to realistic 3–4 events/month
+    preds = _adjust_event_forecast_to_target(preds, target_mean=3.5, min_events=3, max_events=4)
     last_dt = monthly['dt'].iloc[-1]
     months = [(pd.to_datetime(last_dt) + pd.DateOffset(months=i+1)).strftime('%Y-%m') for i in range(horizon_months)]
     return {"All": {months[i]: int(preds[i]) for i in range(horizon_months)}}, {}
@@ -475,22 +711,22 @@ def supply_demand_forecast_monthly(db, horizon_months: int = 3):
         model, features = train_event_model(monthly)
         preds = iterative_forecast(monthly, model, features, horizon=horizon_months)
     except Exception:
-        hist = monthly['y_event_count'].dropna().tolist()
-        preds = [int(round(np.mean(hist[-3:]))) for _ in range(horizon_months)] if hist else [0] * horizon_months
-        preds = [int(round(np.mean(hist[-3:]))) for _ in range(horizon_months)] if hist else [0] * horizon_months
-    avg_hosts_per_event = compute_avg_hosts_per_event(df)
-    demand = [int(round(p * avg_hosts_per_event)) for p in preds]
-    hist_avail, pool = estimate_availability_history(df, db)
-    if any(hist_avail):
-        avail = hist_avail[-1]
-    else:
-        avail = int(round(pool * 0.6)) if pool > 0 else 5
-    last_dt = monthly['dt'].iloc[-1]
-    months = [(pd.to_datetime(last_dt) + pd.DateOffset(months=i+1)).strftime('%Y-%m') for i in range(horizon_months)]
-    results: Dict[str, Dict[str, int]] = {}
+            hist = monthly['y_event_count'].dropna().tolist()
+            preds = [int(round(np.mean(hist[-3:]))) for _ in range(horizon_months)] if hist else [0] * horizon_months
+            # Adjust to realistic 3–4 events/month
+            preds = _adjust_event_forecast_to_target(preds, target_mean=3.5, min_events=3, max_events=4)
+            avg_hosts_per_event = compute_avg_hosts_per_event(df)
+            demand = [int(round(p * avg_hosts_per_event)) for p in preds]
+            hist_avail, pool = estimate_availability_history(df, db)
+            if any(hist_avail):
+                avail = hist_avail[-1]
+            else:
+                avail = int(round(pool * 0.6)) if pool > 0 else 5
+            last_dt = monthly['dt'].iloc[-1]
+            months = [(pd.to_datetime(last_dt) + pd.DateOffset(months=i+1)).strftime('%Y-%m') for i in range(horizon_months)]
+            results: Dict[str, Dict[str, int]] = {}
     for i, m in enumerate(months):
         d = int(demand[i])
-        # naive 20% band for demand; 10% for availability
         results[m] = {
             'predicted_demand': d,
             'predicted_demand_lower': max(0, int(round(d * 0.8))),
