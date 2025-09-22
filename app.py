@@ -1,5 +1,6 @@
 import streamlit as st
 import pandas as pd
+import altair as alt
 from pymongo import MongoClient
 import forecasting
 
@@ -44,14 +45,38 @@ with tab3:
             sd_rows.append({
                 "month": m,
                 "predicted_demand": int(stats.get("predicted_demand", 0)),
+                "predicted_demand_lower": int(stats.get("predicted_demand_lower", 0)),
+                "predicted_demand_upper": int(stats.get("predicted_demand_upper", 0)),
                 "available_hosts": int(stats.get("available_hosts", 0)),
+                "available_hosts_lower": int(stats.get("available_hosts_lower", 0)),
+                "available_hosts_upper": int(stats.get("available_hosts_upper", 0)),
                 "shortage_total": int(stats.get("shortage_total", 0)),
-                "available_exp3plus": int(stats.get("available_exp3plus", 0)),
             })
-        sd_df_m = pd.DataFrame(sd_rows).set_index("month")
-        st.bar_chart(sd_df_m[["predicted_demand", "available_hosts"]])
+        sd_df_m = pd.DataFrame(sd_rows)
+
+        # Demand with confidence band (Altair)
+        st.markdown("**Demand forecast with confidence band**")
+        demand_chart = alt.Chart(sd_df_m).transform_calculate(
+            month_str='datum.month'
+        ).encode(
+            x=alt.X('month_str:N', title='Month')
+        )
+        band = demand_chart.mark_area(opacity=0.2, color='#1f77b4').encode(
+            y=alt.Y('predicted_demand_lower:Q', title='Hosts'),
+            y2='predicted_demand_upper:Q'
+        )
+        mean_line = demand_chart.mark_line(color='#1f77b4').encode(
+            y='predicted_demand:Q'
+        )
+        avail_line = alt.Chart(sd_df_m).mark_line(color='#ff7f0e').encode(
+            x=alt.X('month:N', title='Month'),
+            y=alt.Y('available_hosts:Q', title='Hosts')
+        )
+        st.altair_chart(band + mean_line + avail_line, use_container_width=True)
+
+        # Shortage chart
         st.markdown("**Shortage (total) by month**")
-        st.bar_chart(sd_df_m[["shortage_total"]])
+        st.bar_chart(sd_df_m.set_index("month")[ ["shortage_total"] ])
 
 with tab4:
     st.subheader(f"Onboarding Recommendations (next {horizon} months)")
