@@ -1,11 +1,23 @@
 import streamlit as st
 import pandas as pd
+import altair as alt
 from pymongo import MongoClient
 import forecasting
 
-# Connect to MongoDB
-client = MongoClient("mongodb://localhost:27017/")
-db = client["event_hosting_platform"]
+st.sidebar.header("Data Source")
+json_path = st.sidebar.text_input(
+    "Optional JSON path (use generated dummy JSON to bypass Mongo)",
+    value="",
+    help="If provided, the app will read from this JSON via the same logic as the CLI."
+)
+if json_path:
+    db = forecasting.get_db_from_json(json_path)
+    st.sidebar.success("Using JSON data source")
+else:
+    # Connect to MongoDB
+    client = MongoClient("mongodb://localhost:27017/")
+    db = client["event_hosting_platform"]
+    st.sidebar.info("Using MongoDB at mongodb://localhost:27017/")
 
 st.title("Event Forecasting Dashboard")
 
@@ -13,115 +25,191 @@ st.title("Event Forecasting Dashboard")
 horizon = st.slider("Forecast Horizon (months)", 1, 3, 3)
 months = forecasting.next_n_months_from_today(horizon)
 
+# What-if controls
+st.sidebar.header("What-if Scenarios")
+extra_hosts = st.sidebar.number_input("Additional hosts available per month", min_value=-500, max_value=5000, value=0, step=10)
+event_growth_pct = st.sidebar.slider("Event growth %", -50, 100, 0, help="Applies to forecast demand")
+
+# Skill filter (e.g., language)
+st.sidebar.header("Skill Filter")
+try:
+    hosts_docs = list(db["EventHostUser"].find({}))
+    language_counts = {}
+    for h in hosts_docs:
+        for lang in (h.get("languages") or []):
+            language_counts[lang] = language_counts.get(lang, 0) + 1
+    languages = sorted(language_counts.keys())
+except Exception:
+    hosts_docs = []
+    language_counts = {}
+    languages = []
+
+skill_selected = st.sidebar.selectbox("Language (optional)", options=["All"] + languages, index=0)
+
 # Compute forecasts
-ind_fc, loc_fc = forecasting.forecast_event_volume(db, horizon_months=horizon)
-sd = forecasting.supply_demand_forecast(db, horizon_months=horizon)
-grouped_industry = forecasting.forecast_event_volume_by_industry_grouped(db, horizon_months=horizon)
+ind_fc, _ = forecasting.forecast_event_volume(db, horizon_months=horizon)
+sd_monthly = forecasting.supply_demand_forecast_monthly(db, horizon_months=horizon)
 season = forecasting.seasonal_event_volume_summary(db, horizon_months=horizon)
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
-    "Summary", "Events by Industry", "Events by Location", "Supply–Demand", "Onboarding"
+# Align displayed months with supply–demand results if available
+months_display = list(sd_monthly.keys()) if sd_monthly else months
+
+tab1, tab3, tab4 = st.tabs([
+    "Summary", "Supply–Demand", "Onboarding"
 ])
 
 with tab1:
     all_map = ind_fc.get("All", {})
-    total_events = sum(int(all_map.get(m, 0)) for m in months)
-    avg_events = round(total_events / max(1, len(months)), 1)
-    per_month = {m: int(all_map.get(m, 0)) for m in months}
+    total_events = sum(int(all_map.get(m, 0)) for m in months_display)
+    avg_events = round(total_events / max(1, len(months_display)), 1)
+    per_month = {m: int(all_map.get(m, 0)) for m in months_display}
     c1, c2 = st.columns(2)
-    c1.metric(label=f"Next {len(months)} months total", value=total_events)
+    c1.metric(label=f"Next {len(months_display)} months total", value=total_events)
     c2.metric(label="Average per month", value=avg_events)
     st.bar_chart(pd.DataFrame.from_dict(per_month, orient="index", columns=["events"])) 
     if season:
         st.caption(f"Season {season['season']}: total={season['forecast_total_events']} vs hist-3mo-avg={season['historical_3mo_avg']} ({season['change_pct']}) → {season['signal']}")
 
-with tab2:
-    # Industry forecast (grouped over next N months)
-    ind_df = pd.DataFrame.from_dict(grouped_industry, orient="index", columns=["events_next_window"]).sort_values("events_next_window", ascending=False)
-    st.subheader(f"Events by Industry (next {horizon} months)")
-    st.bar_chart(ind_df)
-    # Per-month industry breakdown table
-    st.caption("Per-month breakdown")
-    pm_rows = []
-    for industry, m_to_v in ind_fc.items():
-        if industry == "All":
-            continue
-        for m in months:
-            pm_rows.append({"industry": industry, "month": m, "events": int(m_to_v.get(m, 0))})
-    if pm_rows:
-        st.dataframe(pd.DataFrame(pm_rows), use_container_width=True)
-
 with tab3:
-    # Location per-month forecast
-    loc_rows = []
-    for loc, m_to_v in loc_fc.items():
-        for m in months:
-            loc_rows.append({"location": loc, "month": m, "events": int(m_to_v.get(m, 0))})
-    if loc_rows:
-        loc_df = pd.DataFrame(loc_rows)
-        st.subheader(f"Events by Location (next {horizon} months)")
-        st.bar_chart(loc_df.pivot(index="month", columns="location", values="events").fillna(0))
+    # Monthly supply–demand view (no industry)
+    st.subheader(f"Supply–Demand (monthly) — next {horizon} months")
+    if sd_monthly:
+        sd_rows = []
+        for m in months_display:
+            stats = sd_monthly.get(m, {})
+            d = int(stats.get("predicted_demand", 0))
+            a = int(stats.get("available_hosts", 0))
+            d_adj = int(round(d * (1 + event_growth_pct / 100.0)))
+            # Apply skill filter capacity reduction if selected
+            if skill_selected != "All" and language_counts:
+                # capacity share proportional to number of hosts with that language
+                lang_share = min(1.0, max(0.0, language_counts.get(skill_selected, 0) / max(1, len(hosts_docs))))
+                a = int(round(a * lang_share))
+            a_adj = max(0, a + int(extra_hosts))
+            shortage_adj = max(0, d_adj - a_adj)
+            sd_rows.append({
+                "month": m,
+                "predicted_demand": d_adj,
+                "available_hosts": a_adj,
+                "shortage_total": shortage_adj,
+            })
+        sd_df_m = pd.DataFrame(sd_rows)
+
+        # Utilization: demand / available * 100 (guard against zero)
+        sd_df_m["utilization_pct"] = sd_df_m.apply(
+            lambda r: (r["predicted_demand"] / r["available_hosts"]) * 100.0 if r["available_hosts"] > 0 else 0.0,
+            axis=1
+        )
+
+        # Demand vs Availability with Shortage highlighted (stacked bars)
+        st.markdown("**Demand vs Availability (shortage highlighted in red)**")
+        sd_df_plot = sd_df_m.copy()
+        sd_df_plot["available_segment"] = sd_df_plot[["available_hosts", "predicted_demand"]].min(axis=1)
+        sd_df_plot["shortage_segment"] = (sd_df_plot["predicted_demand"] - sd_df_plot["available_hosts"]).clip(lower=0)
+        base = alt.Chart(sd_df_plot).encode(x=alt.X('month:N', title='Month'))
+        bars_avail = base.mark_bar(color='#ff7f0e').encode(
+            y=alt.Y('available_segment:Q', title='Hosts'),
+            tooltip=['month', 'available_hosts']
+        )
+        bars_short = base.mark_bar(color='#d62728').encode(
+            y='shortage_segment:Q',
+            tooltip=['month', 'shortage_total']
+        )
+        st.altair_chart(bars_avail + bars_short, use_container_width=True)
+
+        # Shortage chart
+        st.markdown("**Shortage (total) by month**")
+        st.bar_chart(sd_df_m.set_index("month")[ ["shortage_total"] ])
+
+        # Narrative summary
+        total_d = int(sd_df_m["predicted_demand"].sum())
+        total_a = int(sd_df_m["available_hosts"].sum())
+        total_short = max(0, total_d - total_a)
+        st.markdown(
+            f"We expect {total_d} host requests across the next {len(sd_df_m)} months, with {total_a} hosts available, leaving a shortfall of {total_short}."
+        )
+
+        # Utilization KPI and trend
+        avg_util = round(sd_df_m["utilization_pct"].mean(), 1)
+        max_util = round(sd_df_m["utilization_pct"].max(), 1)
+        c3, c4 = st.columns(2)
+        c3.metric(label="Average utilization %", value=f"{avg_util}%")
+        c4.metric(label="Peak utilization %", value=f"{max_util}%")
+        util_chart = alt.Chart(sd_df_m).mark_line(point=True).encode(
+            x=alt.X('month:N', title='Month'),
+            y=alt.Y('utilization_pct:Q', title='Utilization %')
+        )
+        st.markdown("**Utilization over time**")
+        st.altair_chart(util_chart, use_container_width=True)
+
+        # % events fully staffed (mocked: event count approximated by demand / avg_hosts_per_event)
+        # Use avg hosts per event from forecasting helper
+        try:
+            df_hist = forecasting.build_monthly_df(db=db, scope='industry')
+            avg_hosts_per_event = forecasting.compute_avg_hosts_per_event(df_hist if not df_hist.empty else pd.DataFrame(columns=['ym','y_event_count','y_host_demand']))
+        except Exception:
+            avg_hosts_per_event = 4.0
+        # Assume each event needs at least avg_hosts_per_event, fully staffed if availability >= demand
+        sd_df_m["events_approx"] = (sd_df_m["predicted_demand"] / max(1.0, avg_hosts_per_event)).round().astype(int)
+        sd_df_m["fully_staffed_flag"] = (sd_df_m["available_hosts"] >= sd_df_m["predicted_demand"]).astype(int)
+        # percent fully staffed per month (binary for month-level)
+        pct_fully = (sd_df_m["fully_staffed_flag"].mean() * 100.0)
+        st.metric(label="% months fully staffed", value=f"{pct_fully:.0f}%")
 
 with tab4:
-    # Aggregate next N months per industry for supply–demand
-    agg_sd = {}
-    for industry, mstats in sd.items():
-        agg = {"predicted_demand": 0, "available_hosts": 0, "available_bilingual": 0, "available_exp3plus": 0, "shortage_total": 0}
-        for m in months:
-            s = mstats.get(m)
-            if not s:
-                continue
-            for k in agg.keys():
-                agg[k] += int(s.get(k, 0))
-        agg_sd[industry] = agg
-    if agg_sd:
-        sd_df = pd.DataFrame.from_dict(agg_sd, orient="index")
-        st.subheader(f"Supply–Demand by Industry (next {horizon} months)")
-        st.dataframe(sd_df, use_container_width=True)
-        st.bar_chart(sd_df[["predicted_demand", "available_hosts"]])
-
-with tab5:
     st.subheader(f"Onboarding Recommendations (next {horizon} months)")
-    # Build tabular view of gaps by industry and month
-    gap_rows = []
-    for industry, month_stats in sd.items():
-        for m in months:
-            stats = month_stats.get(m, {})
-            demand = int(stats.get("predicted_demand", 0))
-            avail = int(stats.get("available_hosts", 0))
-            bilingual_avail = int(stats.get("available_bilingual", 0))
-            exp3_avail = int(stats.get("available_exp3plus", 0))
-            shortage = max(0, demand - avail)
-            required_bilingual = max(1, demand // 3) if demand > 0 else 0
-            required_exp3 = max(1, demand // 4) if demand > 0 else 0
-            bilingual_gap = max(0, required_bilingual - bilingual_avail)
-            exp3_gap = max(0, required_exp3 - exp3_avail)
-            gap_rows.append({
-                "industry": industry,
-                "month": m,
-                "predicted_demand": demand,
-                "available_hosts": avail,
-                "shortage": shortage,
-                "required_bilingual": required_bilingual,
-                "available_bilingual": bilingual_avail,
-                "bilingual_gap": bilingual_gap,
-                "required_exp3plus": required_exp3,
-                "available_exp3plus": exp3_avail,
-                "exp3plus_gap": exp3_gap,
-            })
-    if not gap_rows:
+    # Monthly-only gaps and charts
+    if not sd_monthly:
         st.write("No critical gaps detected.")
     else:
-        gap_df = pd.DataFrame(gap_rows)
-        st.dataframe(gap_df.sort_values(["shortage", "bilingual_gap", "exp3plus_gap"], ascending=False), use_container_width=True)
+        # Build monthly gaps
+        gap_rows = []
+        for m in months_display:
+            stats = sd_monthly.get(m, {})
+            d = int(stats.get("predicted_demand", 0))
+            a = int(stats.get("available_hosts", 0))
+            d_adj = int(round(d * (1 + event_growth_pct / 100.0)))
+            a_adj = max(0, a + int(extra_hosts))
+            demand = d_adj
+            avail = a_adj
+            shortage = max(0, demand - avail)
+            gap_rows.append({
+                "month": m,
+                "shortage": shortage,
+            })
+        gap_df = pd.DataFrame(gap_rows).set_index("month")
+        st.markdown("**Shortage by month**")
+        st.bar_chart(gap_df[["shortage"]])
 
-        # Charts
-        st.markdown("**Shortage by industry (stacked by month)**")
-        shortage_pivot = gap_df.pivot(index="industry", columns="month", values="shortage").fillna(0)
-        st.bar_chart(shortage_pivot)
+        # Historical vs Forecast events (simple trend)
+        df_hist = forecasting.build_monthly_df(db=db, scope='industry')
+        monthly_hist = forecasting.prepare_global_monthly(df_hist) if not df_hist.empty else pd.DataFrame()
+        if not monthly_hist.empty:
+            hist_tail = monthly_hist.tail(24)[["ym", "y_event_count"]].rename(columns={"ym": "month", "y_event_count": "events"})
+            future_df = pd.DataFrame({
+                "month": months_display,
+                "events": [per_month.get(m, 0) for m in months_display]
+            })
+            hist_tail["type"] = "historical"
+            future_df["type"] = "forecast"
+            trend_df = pd.concat([hist_tail, future_df], ignore_index=True)
+            chart = alt.Chart(trend_df).mark_line().encode(
+                x=alt.X('month:N', title='Month'),
+                y=alt.Y('events:Q', title='Events'),
+                color='type:N'
+            )
+            st.markdown("**Historical vs Forecast events**")
+            st.altair_chart(chart, use_container_width=True)
 
-        st.markdown("**Skill gaps by industry (bilingual vs 3+ years)**")
-        skill_gaps = (
-            gap_df.groupby("industry")[["bilingual_gap", "exp3plus_gap"]].sum().sort_values("bilingual_gap", ascending=False)
+        # Busiest months heatmap by demand
+        st.markdown("**Busiest months heatmap (by demand)**")
+        heat_df = sd_df_m.copy()
+        heat_df["year"] = heat_df["month"].str.slice(0, 4)
+        heat_df["mon"] = heat_df["month"].str.slice(5, 7)
+        heat = alt.Chart(heat_df).mark_rect().encode(
+            x=alt.X('mon:N', title='Month'),
+            y=alt.Y('year:N', title='Year'),
+            color=alt.Color('predicted_demand:Q', title='Demand', scale=alt.Scale(scheme='reds')),
+            tooltip=['month', 'predicted_demand']
         )
-        st.bar_chart(skill_gaps)
+        st.altair_chart(heat, use_container_width=True)

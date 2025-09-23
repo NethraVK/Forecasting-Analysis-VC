@@ -1,6 +1,7 @@
 from pymongo import MongoClient
 from datetime import datetime, timedelta
 import random
+import string
 
 # 1. Connect to MongoDB
 client = MongoClient("mongodb://localhost:27017/")
