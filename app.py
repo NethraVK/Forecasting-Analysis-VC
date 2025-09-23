@@ -95,11 +95,7 @@ with tab3:
             })
         sd_df_m = pd.DataFrame(sd_rows)
 
-        # Utilization: demand / available * 100 (guard against zero)
-        sd_df_m["utilization_pct"] = sd_df_m.apply(
-            lambda r: (r["predicted_demand"] / r["available_hosts"]) * 100.0 if r["available_hosts"] > 0 else 0.0,
-            axis=1
-        )
+        # Removed utilization calculation (no longer displayed)
 
         # Demand vs Availability with Shortage highlighted (stacked bars)
         st.markdown("**Demand vs Availability (shortage highlighted in red)**")
@@ -129,32 +125,9 @@ with tab3:
             f"We expect {total_d} host requests across the next {len(sd_df_m)} months, with {total_a} hosts available, leaving a shortfall of {total_short}."
         )
 
-        # Utilization KPI and trend
-        avg_util = round(sd_df_m["utilization_pct"].mean(), 1)
-        max_util = round(sd_df_m["utilization_pct"].max(), 1)
-        c3, c4 = st.columns(2)
-        c3.metric(label="Average utilization %", value=f"{avg_util}%")
-        c4.metric(label="Peak utilization %", value=f"{max_util}%")
-        util_chart = alt.Chart(sd_df_m).mark_line(point=True).encode(
-            x=alt.X('month:N', title='Month'),
-            y=alt.Y('utilization_pct:Q', title='Utilization %')
-        )
-        st.markdown("**Utilization over time**")
-        st.altair_chart(util_chart, use_container_width=True)
+        # Removed utilization trend chart
 
-        # % events fully staffed (mocked: event count approximated by demand / avg_hosts_per_event)
-        # Use avg hosts per event from forecasting helper
-        try:
-            df_hist = forecasting.build_monthly_df(db=db, scope='industry')
-            avg_hosts_per_event = forecasting.compute_avg_hosts_per_event(df_hist if not df_hist.empty else pd.DataFrame(columns=['ym','y_event_count','y_host_demand']))
-        except Exception:
-            avg_hosts_per_event = 4.0
-        # Assume each event needs at least avg_hosts_per_event, fully staffed if availability >= demand
-        sd_df_m["events_approx"] = (sd_df_m["predicted_demand"] / max(1.0, avg_hosts_per_event)).round().astype(int)
-        sd_df_m["fully_staffed_flag"] = (sd_df_m["available_hosts"] >= sd_df_m["predicted_demand"]).astype(int)
-        # percent fully staffed per month (binary for month-level)
-        pct_fully = (sd_df_m["fully_staffed_flag"].mean() * 100.0)
-        st.metric(label="% months fully staffed", value=f"{pct_fully:.0f}%")
+        # Removed "% months fully staffed" metric and related calculations
 
 with tab4:
     st.subheader(f"Onboarding Recommendations (next {horizon} months)")
