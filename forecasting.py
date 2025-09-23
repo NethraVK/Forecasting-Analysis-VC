@@ -712,29 +712,32 @@ def supply_demand_forecast_monthly(db, horizon_months: int = 3):
         model, features = train_event_model(monthly)
         preds = iterative_forecast(monthly, model, features, horizon=horizon_months)
     except Exception:
-            hist = monthly['y_event_count'].dropna().tolist()
-            preds = [int(round(np.mean(hist[-3:]))) for _ in range(horizon_months)] if hist else [0] * horizon_months
-            # Adjust to realistic 3–4 events/month
-            preds = _adjust_event_forecast_to_target(preds, target_mean=3.5, min_events=3, max_events=4)
-            avg_hosts_per_event = compute_avg_hosts_per_event(df)
-            demand = [int(round(p * avg_hosts_per_event)) for p in preds]
-            hist_avail, pool = estimate_availability_history(df, db)
-            if any(hist_avail):
-                avail = hist_avail[-1]
-            else:
-                avail = int(round(pool * 0.6)) if pool > 0 else 5
-            last_dt = monthly['dt'].iloc[-1]
-            months = [(pd.to_datetime(last_dt) + pd.DateOffset(months=i+1)).strftime('%Y-%m') for i in range(horizon_months)]
-            results: Dict[str, Dict[str, int]] = {}
+        hist = monthly['y_event_count'].dropna().tolist()
+        preds = [int(round(np.mean(hist[-3:]))) for _ in range(horizon_months)] if hist else [0] * horizon_months
+
+    # Align with run_forecast aggregation and availability approach
+    avg_hosts_per_event = compute_avg_hosts_per_event(df)
+    demand = [int(round(p * avg_hosts_per_event)) for p in preds]
+    hist_avail, pool = estimate_availability_history(df, db)
+    if any(hist_avail):
+        avail_seed = hist_avail[-1]
+    else:
+        # If no history, use 70% qualified estimate as pool baseline
+        avail_seed = int(round(pool * 0.7)) if pool > 0 else 5
+
+    last_dt = monthly['dt'].iloc[-1]
+    months = [(pd.to_datetime(last_dt) + pd.DateOffset(months=i+1)).strftime('%Y-%m') for i in range(horizon_months)]
+    results: Dict[str, Dict[str, int]] = {}
     for i, m in enumerate(months):
         d = int(demand[i])
+        a = int(avail_seed)
         results[m] = {
             'predicted_demand': d,
             'predicted_demand_lower': max(0, int(round(d * 0.8))),
             'predicted_demand_upper': int(round(d * 1.2)),
-            'available_hosts': int(avail),
-            'available_hosts_lower': max(0, int(round(avail * 0.9))),
-            'available_hosts_upper': int(round(avail * 1.1)),
-            'shortage_total': max(0, d - int(avail)),
-            }
+            'available_hosts': a,
+            'available_hosts_lower': max(0, int(round(a * 0.9))),
+            'available_hosts_upper': int(round(a * 1.1)),
+            'shortage_total': max(0, d - a),
+        }
     return results
