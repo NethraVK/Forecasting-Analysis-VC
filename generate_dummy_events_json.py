@@ -89,7 +89,7 @@ def generate_events(months: int = 24, seed: int = 42) -> List[dict]:
     return events
 
 
-def generate_hosts(num_hosts: int = 4500, qualified_ratio: float = 0.6) -> List[Dict[str, Any]]:
+def generate_hosts(num_hosts: int = 5000, qualified_ratio: float = 0.6) -> List[Dict[str, Any]]:
     first_names = [
         "Lina", "Yara", "Maya", "Omar", "Ali", "Sara", "Farah", "Noura", "Huda", "Rami",
         "Leila", "Zain", "Faris", "Hassan", "Joudi", "Khaled", "Nadine", "Rasha", "Dina", "Tala",
@@ -164,7 +164,7 @@ def generate_invites(events: List[Dict[str, Any]], hosts: List[Dict[str, Any]], 
     return invites
 
 
-def main(out_path: str = "dummy_mongo_events_generated.json", months: int = 24, seed: int = 42, num_hosts: int = 4500):
+def main(out_path: str = "dummy_mongo_events_generated.json", months: int = 24, seed: int = 42, num_hosts: int = 5000):
     events = generate_events(months=months, seed=seed)
     hosts = generate_hosts(num_hosts=num_hosts, qualified_ratio=0.6)
     invites = generate_invites(events, hosts, seed=seed)

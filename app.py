@@ -30,6 +30,22 @@ st.sidebar.header("What-if Scenarios")
 extra_hosts = st.sidebar.number_input("Additional hosts available per month", min_value=-500, max_value=5000, value=0, step=10)
 event_growth_pct = st.sidebar.slider("Event growth %", -50, 100, 0, help="Applies to forecast demand")
 
+# Skill filter (e.g., language)
+st.sidebar.header("Skill Filter")
+try:
+    hosts_docs = list(db["EventHostUser"].find({}))
+    language_counts = {}
+    for h in hosts_docs:
+        for lang in (h.get("languages") or []):
+            language_counts[lang] = language_counts.get(lang, 0) + 1
+    languages = sorted(language_counts.keys())
+except Exception:
+    hosts_docs = []
+    language_counts = {}
+    languages = []
+
+skill_selected = st.sidebar.selectbox("Language (optional)", options=["All"] + languages, index=0)
+
 # Compute forecasts
 ind_fc, _ = forecasting.forecast_event_volume(db, horizon_months=horizon)
 sd_monthly = forecasting.supply_demand_forecast_monthly(db, horizon_months=horizon)
@@ -64,6 +80,11 @@ with tab3:
             d = int(stats.get("predicted_demand", 0))
             a = int(stats.get("available_hosts", 0))
             d_adj = int(round(d * (1 + event_growth_pct / 100.0)))
+            # Apply skill filter capacity reduction if selected
+            if skill_selected != "All" and language_counts:
+                # capacity share proportional to number of hosts with that language
+                lang_share = min(1.0, max(0.0, language_counts.get(skill_selected, 0) / max(1, len(hosts_docs))))
+                a = int(round(a * lang_share))
             a_adj = max(0, a + int(extra_hosts))
             shortage_adj = max(0, d_adj - a_adj)
             sd_rows.append({
@@ -121,6 +142,20 @@ with tab3:
         st.markdown("**Utilization over time**")
         st.altair_chart(util_chart, use_container_width=True)
 
+        # % events fully staffed (mocked: event count approximated by demand / avg_hosts_per_event)
+        # Use avg hosts per event from forecasting helper
+        try:
+            df_hist = forecasting.build_monthly_df(db=db, scope='industry')
+            avg_hosts_per_event = forecasting.compute_avg_hosts_per_event(df_hist if not df_hist.empty else pd.DataFrame(columns=['ym','y_event_count','y_host_demand']))
+        except Exception:
+            avg_hosts_per_event = 4.0
+        # Assume each event needs at least avg_hosts_per_event, fully staffed if availability >= demand
+        sd_df_m["events_approx"] = (sd_df_m["predicted_demand"] / max(1.0, avg_hosts_per_event)).round().astype(int)
+        sd_df_m["fully_staffed_flag"] = (sd_df_m["available_hosts"] >= sd_df_m["predicted_demand"]).astype(int)
+        # percent fully staffed per month (binary for month-level)
+        pct_fully = (sd_df_m["fully_staffed_flag"].mean() * 100.0)
+        st.metric(label="% months fully staffed", value=f"{pct_fully:.0f}%")
+
 with tab4:
     st.subheader(f"Onboarding Recommendations (next {horizon} months)")
     # Monthly-only gaps and charts
@@ -165,3 +200,16 @@ with tab4:
             )
             st.markdown("**Historical vs Forecast events**")
             st.altair_chart(chart, use_container_width=True)
+
+        # Busiest months heatmap by demand
+        st.markdown("**Busiest months heatmap (by demand)**")
+        heat_df = sd_df_m.copy()
+        heat_df["year"] = heat_df["month"].str.slice(0, 4)
+        heat_df["mon"] = heat_df["month"].str.slice(5, 7)
+        heat = alt.Chart(heat_df).mark_rect().encode(
+            x=alt.X('mon:N', title='Month'),
+            y=alt.Y('year:N', title='Year'),
+            color=alt.Color('predicted_demand:Q', title='Demand', scale=alt.Scale(scheme='reds')),
+            tooltip=['month', 'predicted_demand']
+        )
+        st.altair_chart(heat, use_container_width=True)
