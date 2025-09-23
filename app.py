@@ -55,7 +55,7 @@ season = forecasting.seasonal_event_volume_summary(db, horizon_months=horizon)
 months_display = list(sd_monthly.keys()) if sd_monthly else months
 
 tab1, tab3, tab4 = st.tabs([
-    "Summary", "Supply–Demand", "Onboarding"
+    "Summary", "Hostess Demand", "Onboarding"
 ])
 
 with tab1:
@@ -72,7 +72,7 @@ with tab1:
 
 with tab3:
     # Monthly supply–demand view (no industry)
-    st.subheader(f"Supply–Demand (monthly) — next {horizon} months")
+    st.subheader(f"Hostess Demand (monthly) — next {horizon} months")
     if sd_monthly:
         sd_rows = []
         for m in months_display:
