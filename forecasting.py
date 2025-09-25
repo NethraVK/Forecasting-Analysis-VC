@@ -169,7 +169,7 @@ def month_key(dt: datetime) -> str:
     return dt.strftime("%Y-%m")
 
 
-def _adjust_event_forecast_to_target(preds: List[int], target_mean: float = 3.5, min_events: int = 3, max_events: int = 4) -> List[int]:
+def _adjust_event_forecast_to_target(preds: List[int], target_mean: float = 2.5, min_events: int = 2, max_events: int = 3) -> List[int]:
     """Scale forecasts to be around target_mean and clamp to [min_events, max_events]."""
     if not preds:
         return preds
@@ -657,7 +657,7 @@ def forecast_event_volume(db, horizon_months: int = 3):
         hist = monthly['y_event_count'].dropna().tolist()
         preds = [int(round(np.mean(hist[-3:]))) for _ in range(horizon_months)] if hist else [0] * horizon_months
     # Adjust to realistic 3–4 events/month
-    preds = _adjust_event_forecast_to_target(preds, target_mean=3.5, min_events=3, max_events=4)
+    preds = _adjust_event_forecast_to_target(preds, target_mean=2.5, min_events=2, max_events=3)
     last_dt = monthly['dt'].iloc[-1]
     months = [(pd.to_datetime(last_dt) + pd.DateOffset(months=i+1)).strftime('%Y-%m') for i in range(horizon_months)]
     return {"All": {months[i]: int(preds[i]) for i in range(horizon_months)}}, {}
