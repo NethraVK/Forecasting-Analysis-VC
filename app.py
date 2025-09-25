@@ -135,24 +135,7 @@ with tab4:
     if not sd_monthly:
         st.write("No critical gaps detected.")
     else:
-        # Build monthly gaps
-        gap_rows = []
-        for m in months_display:
-            stats = sd_monthly.get(m, {})
-            d = int(stats.get("predicted_demand", 0))
-            a = int(stats.get("available_hosts", 0))
-            d_adj = int(round(d * (1 + event_growth_pct / 100.0)))
-            a_adj = max(0, a + int(extra_hosts))
-            demand = d_adj
-            avail = a_adj
-            shortage = max(0, demand - avail)
-            gap_rows.append({
-                "month": m,
-                "shortage": shortage,
-            })
-        gap_df = pd.DataFrame(gap_rows).set_index("month")
-        st.markdown("**Shortage by month**")
-        st.bar_chart(gap_df[["shortage"]])
+        # Removed duplicate "Shortage by month" chart (already shown in Hostess Demand tab)
 
         # Historical vs Forecast events (simple trend)
         df_hist = forecasting.build_monthly_df(db=db, scope='industry')
