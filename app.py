@@ -55,7 +55,7 @@ season = forecasting.seasonal_event_volume_summary(db, horizon_months=horizon)
 months_display = list(sd_monthly.keys()) if sd_monthly else months
 
 tab1, tab3, tab4 = st.tabs([
-    "Summary", "Hostess Demand", "Onboarding"
+    "Summary", "Hostess Demand", "Historical vs Forecast"
 ])
 
 with tab1:
@@ -135,7 +135,6 @@ with tab3:
         # Removed "% months fully staffed" metric and related calculations
 
 with tab4:
-    st.subheader(f"Onboarding Recommendations (next {horizon} months)")
     # Monthly-only gaps and charts
     if not sd_monthly:
         st.write("No critical gaps detected.")
