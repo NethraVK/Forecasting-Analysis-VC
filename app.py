@@ -47,7 +47,7 @@ except Exception:
 skill_selected = st.sidebar.selectbox("Language (optional)", options=["All"] + languages, index=0)
 
 # Compute forecasts
-ind_fc, _ = forecasting.forecast_event_volume(db, horizon_months=horizon)
+ind_fc, model_metrics = forecasting.forecast_event_volume(db, horizon_months=horizon)
 sd_monthly = forecasting.supply_demand_forecast_monthly(db, horizon_months=horizon)
 season = forecasting.seasonal_event_volume_summary(db, horizon_months=horizon)
 
@@ -63,9 +63,14 @@ with tab1:
     total_events = sum(int(all_map.get(m, 0)) for m in months_display)
     avg_events = round(total_events / max(1, len(months_display)), 1)
     per_month = {m: int(all_map.get(m, 0)) for m in months_display}
-    c1, c2 = st.columns(2)
+    mae_val = (model_metrics or {}).get("mae")
+    c1, c2, c3 = st.columns(3)
     c1.metric(label=f"Next {len(months_display)} months total", value=total_events)
     c2.metric(label="Average per month", value=avg_events)
+    if mae_val is None:
+        c3.metric(label="Model MAE (holdout)", value="N/A")
+    else:
+        c3.metric(label="Model MAE (holdout)", value=f"{mae_val:.2f}")
     st.bar_chart(pd.DataFrame.from_dict(per_month, orient="index", columns=["events"])) 
     if season:
         st.caption(f"Season {season['season']}: total={season['forecast_total_events']} vs hist-3mo-avg={season['historical_3mo_avg']} ({season['change_pct']}) → {season['signal']}")

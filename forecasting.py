@@ -474,7 +474,7 @@ def train_event_model(monthly: pd.DataFrame, horizon: int = 1):
     preds = model.predict(X_test)
     mae = mean_absolute_error(y_test, preds)
     print(f"Trained event model. Holdout MAE: {mae:.2f} events/month")
-    return model, features
+    return model, features, float(mae)
 
 
 def iterative_forecast(monthly: pd.DataFrame, model, features: List[str], horizon: int = 3) -> List[int]:
@@ -558,7 +558,7 @@ def run_forecast(mongo_uri: str, db_name: str, horizon: int = 3, scope: str = 'i
     monthly = prepare_global_monthly(df)
 
     try:
-        model, features = train_event_model(monthly)
+        model, features, mae = train_event_model(monthly)
     except Exception as e:
         print('Could not train ML model (not enough history or other issue):', e)
         print('Falling back to simple moving average forecast on recent months.')
@@ -651,16 +651,18 @@ def forecast_event_volume(db, horizon_months: int = 3):
     if monthly.empty:
         return {"All": {}}, {}
     try:
-        model, features = train_event_model(monthly)
+        model, features, mae = train_event_model(monthly)
         preds = iterative_forecast(monthly, model, features, horizon=horizon_months)
+        metrics = { 'mae': float(mae) }
     except Exception:
         hist = monthly['y_event_count'].dropna().tolist()
         preds = [int(round(np.mean(hist[-3:]))) for _ in range(horizon_months)] if hist else [0] * horizon_months
+        metrics = { 'mae': None }
     # Adjust to realistic 3–4 events/month
     preds = _adjust_event_forecast_to_target(preds, target_mean=2.5, min_events=2, max_events=3)
     last_dt = monthly['dt'].iloc[-1]
     months = [(pd.to_datetime(last_dt) + pd.DateOffset(months=i+1)).strftime('%Y-%m') for i in range(horizon_months)]
-    return {"All": {months[i]: int(preds[i]) for i in range(horizon_months)}}, {}
+    return {"All": {months[i]: int(preds[i]) for i in range(horizon_months)}}, metrics
 
 
 def seasonal_event_volume_summary(db, horizon_months: int = 3) -> Dict[str, str]:
@@ -709,7 +711,7 @@ def supply_demand_forecast_monthly(db, horizon_months: int = 3):
     if monthly.empty:
         return {}
     try:
-        model, features = train_event_model(monthly)
+        model, features, _ = train_event_model(monthly)
         preds = iterative_forecast(monthly, model, features, horizon=horizon_months)
     except Exception:
         hist = monthly['y_event_count'].dropna().tolist()
