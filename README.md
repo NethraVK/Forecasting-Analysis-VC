@@ -13,7 +13,7 @@
 4. [Tech Stack](#tech-stack)  
 5. [How to Run](#how-to-run)   
 7. [Using the App](#using-the-app)
-8. [Common Issues & Fixes](#common-issues-&-fixes)
+8. [Common Issues & Fixes](#common-issues--fixes)
    
 ---
 
