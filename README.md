@@ -7,13 +7,13 @@
 ---
 
 ## 📘 Table of Contents  
-1. [Overview](#-overview)  
-2. [Features](#-features)  
-3. [Why This Matters](#-why-this-matters)  
-4. [Tech Stack](#-tech-stack)  
-5. [How to Run](#-how-to-run)   
-7. [Using the App](#-using-the-app)
-8. [Common Issues & Fixes](#-common-issues-&-fixes)
+1. [Overview](#overview)  
+2. [Features](#features)  
+3. [Why This Matters](#why-this-matters)  
+4. [Tech Stack](#tech-stack)  
+5. [How to Run](#how-to-run)   
+7. [Using the App](#using-the-app)
+8. [Common Issues & Fixes](#common-issues-&-fixes)
    
 ---
 
@@ -68,13 +68,14 @@ The Streamlit dashboard provides an interactive UI to explore forecasts, adjust 
 
 ---
 
-## Why This Matters  
+## Why This Matters 
+
 Event agencies often rely on guesswork or reactive planning. This tool helps:
-✔ Identify shortages early
-✔ Optimize staffing & reduce costs
-✔ Forecast busy months
-✔ Plan across languages
-✔ Make data-driven decisions
+- Identify shortages early
+- Optimize staffing & reduce costs
+- Forecast busy months
+- Plan across languages
+- Make data-driven decisions
 
 ---
 
